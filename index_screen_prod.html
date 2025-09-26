@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Talking Avatar</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: white;
+            margin: 0;
+            padding: 0;
+            color: black;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .main-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: 100vh;
+            gap: 30px;
+        }
+
+        .avatar-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        
+        .avatar-gif {
+            width: 400px;
+            height: 500px;
+            object-fit: cover;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 16px;
+            min-width: 150px;
+            border-radius: 5px;
+            background: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .status-text {
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .avatar-gif {
+                width: 300px;
+                height: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="avatar-container">
+            <img id="avatarGif" class="avatar-gif" src="listening.gif" alt="Avatar">
+        </div>
+        
+        <div id="statusText" class="status-text">Waiting to start</div>
+        
+        <button id="sessionBtn">Start Session</button>
+    </div>
+
+    <script>
+        let isRecording = false;
+        let mediaStream = null;
+        let audioContext = null;
+        let processor = null;
+        let ws = null;
+        let nextPlayTime = 0;
+        const WS_PORT = 8000;
+        let activeSources = [];
+        let isGeminiSpeaking = false;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 3;
+        let reconnectionInProgress = false;
+        let firstMessageReceived = false;
+
+        const SAMPLE_BUFFER_SIZE = 4096;
+
+        const audioFormat = {
+            channels: 1,
+            sampwidth: 2,
+            framerate: 24000,
+            format: "raw"
+        };
+
+        const sessionBtn = document.getElementById('sessionBtn');
+        const avatarGif = document.getElementById('avatarGif');
+        const statusText = document.getElementById('statusText');
+
+        function updateAvatar(state) {
+            switch(state) {
+                case 'listening':
+                    avatarGif.src = 'listening.gif';
+                    statusText.textContent = 'Listening';
+                    break;
+                case 'speaking':
+                    avatarGif.src = 'speaking.gif';
+                    statusText.textContent = 'Speaking';
+                    break;
+                case 'waiting':
+                    avatarGif.src = 'listening.gif';
+                    statusText.textContent = 'Waiting to start';
+                    break;
+                case 'connecting':
+                    avatarGif.src = 'listening.gif';
+                    statusText.textContent = 'Connecting...';
+                    break;
+            }
+        }
+
+        function float32ToInt16(float32Data) {
+            for (let i = 0; i < float32Data.length; i++) {
+                if (float32Data[i] > 1.0) float32Data[i] = 1.0;
+                if (float32Data[i] < -1.0) float32Data[i] = -1.0;
+            }
+            
+            const int16Data = new Int16Array(float32Data.length);
+            for (let i = 0; i < float32Data.length; i++) {
+                int16Data[i] = Math.round(float32Data[i] * 32767.0);
+            }
+            
+            return int16Data;
+        }
+        
+        function int16ToFloat32(int16Data) {
+            const float32Data = new Float32Array(int16Data.length);
+            for (let i = 0; i < int16Data.length; i++) {
+                float32Data[i] = int16Data[i] / 32768.0;
+            }
+            
+            return float32Data;
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+
+        function base64ToArrayBuffer(base64) {
+            const binary_string = window.atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        function playAudioChunk(chunkBase64) {
+            try {
+                if (!audioContext) return;
+                
+                const arrayBuffer = base64ToArrayBuffer(chunkBase64);
+                const int16Data = new Int16Array(arrayBuffer);
+                const float32Data = int16ToFloat32(int16Data);
+                
+                const numSamples = float32Data.length;
+                const buffer = audioContext.createBuffer(1, numSamples, audioFormat.framerate);
+                buffer.getChannelData(0).set(float32Data);
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                
+                const currentTime = audioContext.currentTime;
+                if (nextPlayTime < currentTime) {
+                    nextPlayTime = currentTime;
+                }
+                source.start(nextPlayTime);
+                activeSources.push(source);
+                nextPlayTime += buffer.duration;
+                source.onended = () => {
+                    activeSources = activeSources.filter(s => s !== source);
+                };
+            } catch (err) {
+                console.error("Error in playAudioChunk:", err);
+            }
+        }
+
+        function stopAllAudio() {
+            activeSources.forEach(source => {
+                try {
+                    source.stop();
+                } catch (e) {
+                    // Ignore errors if source already ended
+                }
+            });
+            activeSources = [];
+            nextPlayTime = audioContext ? audioContext.currentTime : 0;
+        }
+
+        function openWebSocket() {
+            const wsUrl = `wss://website-voicebot.mysentry.ai/ws`;
+            
+            if (ws) {
+                ws.close();
+            }
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                reconnectAttempts = 0;
+                reconnectionInProgress = false;
+                updateAvatar('connecting');
+                
+                const startMessage = {
+                    type: "start",
+                    audio_format: audioFormat
+                };
+                
+                ws.send(JSON.stringify(startMessage));
+                firstMessageReceived = false;
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    
+                    if (message.type === "audio" && message.chunk) {
+                        if (!isGeminiSpeaking) {
+                            isGeminiSpeaking = true;
+                            updateAvatar('speaking');
+                        }
+                        
+                        if (!firstMessageReceived) {
+                            firstMessageReceived = true;
+                        }
+                        
+                        playAudioChunk(message.chunk);
+                    }
+                    else if (message.type === "turn_complete") {
+                        isGeminiSpeaking = false;
+                        updateAvatar('listening');
+                    }
+                    else if (message.type === "interrupt_confirmed") {
+                        stopAllAudio();
+                        isGeminiSpeaking = false;
+                        updateAvatar('listening');
+                    }
+                    else if (message.ai_speaking !== undefined) {
+                        const wasSpeaking = isGeminiSpeaking;
+                        isGeminiSpeaking = message.ai_speaking;
+                        
+                        if (wasSpeaking !== isGeminiSpeaking) {
+                            if (isGeminiSpeaking) {
+                                updateAvatar('speaking');
+                            } else {
+                                updateAvatar('listening');
+                            }
+                        }
+                    }
+                    else if (message.error) {
+                        updateAvatar('waiting');
+                    }
+
+                } catch (err) {
+                    console.error("Error processing message:", err);
+                }
+            };
+
+            ws.onerror = (err) => {
+                console.error("WebSocket error:", err);
+                updateAvatar('waiting');
+                
+                if (isRecording && !reconnectionInProgress) {
+                    handleConnectionFailure();
+                } else {
+                    sessionBtn.disabled = false;
+                    sessionBtn.innerText = "Start Session";
+                }
+            };
+
+            ws.onclose = () => {
+                updateAvatar('waiting');
+                
+                if (isRecording && !reconnectionInProgress) {
+                    handleConnectionFailure();
+                } else {
+                    isGeminiSpeaking = false;
+                }
+            };
+            
+            return ws;
+        }
+
+        function handleConnectionFailure() {
+            if (reconnectAttempts >= maxReconnectAttempts) {
+                updateAvatar('waiting');
+                stopSession();
+                return;
+            }
+            
+            reconnectionInProgress = true;
+            reconnectAttempts++;
+            
+            updateAvatar('connecting');
+            
+            setTimeout(() => {
+                if (isRecording) {
+                    ws = openWebSocket();
+                }
+            }, 1000);
+        }
+
+        async function setupAudioProcessing() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: audioFormat.framerate
+                });
+                
+                nextPlayTime = audioContext.currentTime;
+                
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: audioFormat.framerate,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                
+                processor = audioContext.createScriptProcessor(SAMPLE_BUFFER_SIZE, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                processor.onaudioprocess = (event) => {
+                    if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+                    
+                    const inputBuffer = event.inputBuffer.getChannelData(0);
+                    const int16Data = float32ToInt16(inputBuffer);
+                    const b64Data = arrayBufferToBase64(int16Data.buffer);
+                    
+                    const message = {
+                        type: "audio_chunk",
+                        chunk: b64Data
+                    };
+                    
+                    try {
+                        ws.send(JSON.stringify(message));
+                    } catch (e) {
+                        console.error("Error sending audio chunk:", e);
+                    }
+                };
+                
+                return true;
+            } catch (err) {
+                console.error("Error setting up audio:", err);
+                updateAvatar('waiting');
+                return false;
+            }
+        }
+
+        async function startSession() {
+            sessionBtn.innerText = "Starting...";
+            sessionBtn.disabled = true;
+            
+            const setupSuccess = await setupAudioProcessing();
+            if (!setupSuccess) {
+                sessionBtn.innerText = "Start Session";
+                sessionBtn.disabled = false;
+                updateAvatar('waiting');
+                return false;
+            }
+            
+            reconnectAttempts = 0;
+            reconnectionInProgress = false;
+            
+            ws = openWebSocket();
+            
+            sessionBtn.innerText = "Stop Session";
+            sessionBtn.disabled = false;
+            updateAvatar('connecting');
+            
+            return true;
+        }
+
+        function stopSession() {
+            isRecording = false;
+            reconnectionInProgress = false;
+            
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            if (audioContext) {
+                stopAllAudio();
+            }
+            
+            isGeminiSpeaking = false;
+            sessionBtn.innerText = "Start Session";
+            sessionBtn.disabled = false;
+            updateAvatar('waiting');
+        }
+
+        sessionBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                isRecording = await startSession();
+            } else {
+                sessionBtn.disabled = true;
+                sessionBtn.innerText = "Stopping...";
+                stopSession();
+            }
+        });
+
+        window.addEventListener('beforeunload', () => {
+            if (isRecording) {
+                stopSession();
+            }
+        });
+
+        updateAvatar('waiting');
+    </script>
+</body>
+</html>
