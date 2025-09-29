@@ -27,19 +27,29 @@
             gap: 30px;
         }
 
-        .avatar-container {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            position: relative;
-        }
-        
-        .avatar-gif {
-            width: 400px;
-            height: 500px;
-            object-fit: cover;
-        }
+       .avatar-container {
+        position: relative;
+        width: 300px;
+        height: 445px;
+    }
 
+    /* Two stacked videos for smooth fade */
+    .avatar-video {
+        position: absolute;
+        top: 0; left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 8px;
+        margin-left: auto;
+        margin-right: auto;
+        opacity: 0;
+        transition: opacity 0.5s ease-in-out;
+    }
+    .avatar-video.active {
+        opacity: 1;
+        z-index: 2;
+    }
         button {
             padding: 15px 30px;
             font-size: 16px;
@@ -72,13 +82,24 @@
                 width: 300px;
                 height: 400px;
             }
+             .avatar-video {
+                width: 100%;
+                height: 100%;
+            }
         }
     </style>
 </head>
 <body>
     <div class="main-container">
         <div class="avatar-container">
-            <img id="avatarGif" class="avatar-gif" src="listening.gif" alt="Avatar">
+            <!-- <img id="avatarGif" class="avatar-gif" src="listening.gif" alt="Avatar"> -->
+            <!-- preload & loop both videos -->
+        <video id="listeningVideo" class="avatar-video active" autoplay muted loop playsinline>
+            <source src="listening.webm" type="video/webm">
+        </video>
+        <video id="speakingVideo" class="avatar-video" autoplay muted loop playsinline>
+            <source src="speaking.webm" type="video/webm">
+        </video>
         </div>
         
         <div id="statusText" class="status-text">Waiting to start</div>
@@ -111,29 +132,36 @@
         };
 
         const sessionBtn = document.getElementById('sessionBtn');
-        const avatarGif = document.getElementById('avatarGif');
-        const statusText = document.getElementById('statusText');
+const listeningVideo = document.getElementById('listeningVideo');
+const speakingVideo  = document.getElementById('speakingVideo');
+const statusText     = document.getElementById('statusText');
 
-        function updateAvatar(state) {
-            switch(state) {
-                case 'listening':
-                    avatarGif.src = 'listening.gif';
-                    statusText.textContent = 'Listening';
-                    break;
-                case 'speaking':
-                    avatarGif.src = 'speaking.gif';
-                    statusText.textContent = 'Speaking';
-                    break;
-                case 'waiting':
-                    avatarGif.src = 'listening.gif';
-                    statusText.textContent = 'Waiting to start';
-                    break;
-                case 'connecting':
-                    avatarGif.src = 'listening.gif';
-                    statusText.textContent = 'Connecting...';
-                    break;
-            }
-        }
+/* -------- Smooth avatar state handler -------- */
+function updateAvatar(state) {
+    switch(state) {
+        case 'listening':
+            listeningVideo.classList.add('active');
+            speakingVideo.classList.remove('active');
+            statusText.textContent = 'Listening';
+            break;
+        case 'speaking':
+            speakingVideo.classList.add('active');
+            listeningVideo.classList.remove('active');
+            statusText.textContent = 'Speaking';
+            break;
+        case 'waiting':
+            listeningVideo.classList.add('active');
+            speakingVideo.classList.remove('active');
+            statusText.textContent = 'Waiting to start';
+            break;
+        case 'connecting':
+            listeningVideo.classList.add('active');
+            speakingVideo.classList.remove('active');
+            statusText.textContent = 'Connecting...';
+            break;
+    }
+}
+/* --------------------------------------------- */
 
         function float32ToInt16(float32Data) {
             for (let i = 0; i < float32Data.length; i++) {
